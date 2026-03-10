@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "pluginId": "numerical-propagator",
+  "pluginType": "propagator",
+  "vendorId": "the-lobsternaut",
+  "name": "Numerical Propagator Plugin (Tudat)",
+  "version": "0.1.0",
+  "description": "High-fidelity numerical orbit propagator powered by Tudat-WASM. Supports configurable force models (point-mass, J2/J4/full spherical harmonics, atmospheric drag, SRP, third-body, relativistic corrections), multiple integrators (RK4, RKF45/78, Bulirsch-Stoer, ABM), and covariance/STM propagation.",
+  "license": "BSD-3-Clause",
+  "capabilities": {
+    "parse": true,
+    "convert": true,
+    "process": true,
+    "streaming": false
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "initial_state",
+        "description": "Initial Cartesian state (position + velocity in J2000 ECI, meters + m/s)",
+        "schema": "OEM",
+        "fileId": "$OEM",
+        "required": true
+      },
+      {
+        "name": "config",
+        "description": "Propagation configuration (force model, integrator, time range)",
+        "schema": "PropagatorConfig",
+        "required": false
+      }
+    ],
+    "outputs": [
+      {
+        "name": "ephemeris",
+        "description": "Propagated ephemeris in OEM format",
+        "schema": "OEM",
+        "fileId": "$OEM"
+      },
+      {
+        "name": "stm",
+        "description": "State Transition Matrix history (optional)",
+        "schema": "STM",
+        "required": false
+      }
+    ]
+  },
+  "dependencies": {
+    "tudat-wasm": {
+      "source": "https://github.com/DigitalArsenal/tudat-wasm.git",
+      "license": "BSD-3-Clause",
+      "version": "HEAD"
+    }
+  },
+  "wasm": {
+    "exportName": "NUMERICAL_PROP_WASM",
+    "initialMemoryMB": 64,
+    "maxMemoryMB": 512
+  }
+}
