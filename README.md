@@ -1,137 +1,147 @@
-# Numerical Propagator SDN Plugin
+# 🛰️ Numerical Propagator Plugin (Tudat)
 
-High-fidelity numerical orbit propagator for the [Space Data Network](https://github.com/the-lobsternaut/space-data-network), powered by [Tudat](https://github.com/tudat-team/tudat). Configurable force models, multiple integrators, and optional state transition matrix propagation — compiled to WebAssembly.
+[![Build Status](https://img.shields.io/github/actions/workflow/status/the-lobsternaut/numerical-propagator-sdn-plugin/build.yml?branch=main&style=flat-square)](https://github.com/the-lobsternaut/numerical-propagator-sdn-plugin/actions)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-blue?style=flat-square)](LICENSE)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue?style=flat-square)](https://en.cppreference.com/w/cpp/17)
+[![WASM](https://img.shields.io/badge/WASM-ready-blueviolet?style=flat-square)](wasm/)
+[![SDN Plugin](https://img.shields.io/badge/SDN-Plugin-orange?style=flat-square)](https://github.com/the-lobsternaut)
 
-## Force Models
+**High-fidelity numerical orbit propagation powered by Tudat-WASM — configurable force models, 7 integrators, covariance/STM propagation, and relativistic corrections.**
 
-| Model | Options | Default |
-|---|---|---|
-| **Gravity** | Point-mass, J2, J4, full spherical harmonics (degree/order) | SH 8×8 |
-| **Atmosphere** | None, Exponential, NRLMSISE-00 | Exponential |
-| **SRP** | None, Cannonball | Cannonball |
-| **Third-body** | Sun, Moon, Jupiter (toggleable) | Sun + Moon |
-| **Relativistic** | Schwarzschild, Lense-Thirring | Off |
+---
 
-## Integrators
+## Overview
 
-| Type | Step | Use Case |
-|---|---|---|
-| Euler | Fixed | Testing only |
-| RK4 | Fixed | Fast, moderate accuracy |
-| RKF45 | Variable | General purpose |
-| **RKF78** | Variable | **Default — high accuracy** |
-| RKDP87 | Variable | Near-machine precision |
-| Bulirsch-Stoer | Variable | Stiff problems, long arcs |
-| ABM | Multi-step | Long-duration propagation |
+The Numerical Propagator is the full-fidelity propagation backend for the Space Data Network, wrapping TU Delft's [Tudat](https://tudat-space.readthedocs.io/) astrodynamics library compiled to WASM.
 
-## Usage
+### Force Models
+
+| Force | Models | Reference |
+|-------|--------|-----------|
+| **Gravity** | Point-mass, J2, J4, full spherical harmonics (N×M) | Montenbruck & Gill Ch. 3.2 |
+| **Drag** | Exponential, NRLMSISE-00 | Picone et al. (2002) |
+| **SRP** | Cannonball (with shadow) | Montenbruck & Gill Ch. 3.4 |
+| **Third-body** | Sun, Moon, planets | Vallado Algorithm 29/31 |
+| **Relativistic** | Schwarzschild, Lense-Thirring, de Sitter | IERS Conventions (2010) |
+
+### Integrators
+
+| Integrator | Type | Order | Best For |
+|-----------|------|-------|----------|
+| Euler | Fixed | 1st | Testing only |
+| RK4 | Fixed | 4th | Fast propagation |
+| **RKF-45** | Adaptive | 4(5) | Standard operational |
+| RKF-78 | Adaptive | 7(8) | High-fidelity |
+| RKDP-87 | Adaptive | 8(7) | Very high-fidelity |
+| Bulirsch-Stoer | Extrapolation | Variable | Smooth trajectories |
+| Adams-Bashforth-Moulton | Multi-step | Variable | Long propagations |
+
+---
+
+## Architecture
+
+```mermaid
+graph TB
+    subgraph "Configuration"
+        A["Force Model Config"]
+        B["Integrator Config"]
+        C["Initial State"]
+    end
+
+    subgraph "Tudat-WASM Engine"
+        D["Environment Setup<br/>(bodies, gravity fields)"]
+        E["Acceleration Models<br/>(composable stack)"]
+        F["Integrator<br/>(RKF45/78, BS, ABM)"]
+        G["STM Propagation<br/>(optional, 42-element)"]
+    end
+
+    subgraph "Output"
+        H["OEM FlatBuffer<br/>($OEM)"]
+        I["Covariance<br/>(6×6 at each step)"]
+    end
+
+    A & B & C --> D
+    D --> E --> F
+    F --> G
+    F --> H
+    G --> I
+```
+
+---
+
+## Research & References
+
+- Dirkx, D. et al. (2019). ["Tudat: a modular and versatile astrodynamics toolbox"](https://doi.org/10.2514/1.G003677). *JGCD*. Tudat library architecture.
+- Montenbruck, O. & Gill, E. (2000). *Satellite Orbits*. Springer. Force models and integration.
+- Vallado, D. A. (2013). *Fundamentals of Astrodynamics and Applications*, 4th ed.
+- IERS Conventions (2010). Relativistic corrections for orbit propagation.
+- Holmes, S. A. & Featherstone, W. E. (2002). Stable geopotential recursion.
+
+---
+
+## Build Instructions
+
+```bash
+git clone --recursive https://github.com/the-lobsternaut/numerical-propagator-sdn-plugin.git
+cd numerical-propagator-sdn-plugin
+
+mkdir -p build && cd build
+cmake ../src/cpp -DCMAKE_CXX_STANDARD=17
+make -j$(nproc)
+ctest --output-on-failure
+
+# WASM build (requires tudat-wasm)
+./build.sh
+```
+
+---
+
+## Usage Examples
 
 ```cpp
 #include "numerical_prop/propagator.h"
 
-using namespace numerical_prop;
+numerical_prop::ForceModelConfig forces;
+forces.gravity = numerical_prop::GravityModel::SPHERICAL_HARMONICS;
+forces.gravity_degree = 21;
+forces.atmosphere = numerical_prop::AtmosphereModel::NRLMSISE00;
+forces.srp = numerical_prop::SRPModel::CANNONBALL;
+forces.third_body_sun = true;
+forces.third_body_moon = true;
 
-// Initial state (km, km/s, J2000 ECI)
-StateVector initial = { epoch_jd, 6778.0, 0, 0, 0, 7.669, 0 };
+numerical_prop::IntegratorConfig integrator;
+integrator.type = numerical_prop::IntegratorType::RKF78;
+integrator.abs_tol = 1e-12;
 
-// Configure
-PropagationConfig config;
-config.duration_days = 7.0;
-config.output_step_s = 60.0;
-config.forces = presets::leo_standard();
-config.integrator.type = IntegratorType::RKF78;
-config.integrator.rel_tolerance = 1e-12;
+numerical_prop::StateVector initial = {2460000.5, 7000, 0, 0, 0, 7.546, 0};
 
-// Propagate
-auto result = propagate(initial, config);
-// result.states: vector of StateVector
-// result.computation_time_ms, result.function_evaluations
-
-// Single-point propagation
-auto state = propagate_to_epoch(initial, target_jd);
-
-// OEM FlatBuffer output
-uint8_t buffer[1024*1024];
-int32_t size = propagate_to_oem(initial, config, buffer, sizeof(buffer));
+auto ephemeris = numerical_prop::propagate(initial, 7.0, forces, integrator, 60.0);
 ```
 
-## Presets
+---
 
-```cpp
-// Ready-made force model configurations
-auto leo   = presets::leo_standard();      // SH 8×8, exp atm, SRP, Sun+Moon
-auto geo   = presets::geo_standard();      // SH 8×8, no drag, SRP, Sun+Moon
-auto deep  = presets::deep_space();        // Point mass, Sun+Moon+Jupiter
-auto hifi  = presets::leo_high_fidelity(); // SH 70×70, NRLMSISE, relativistic
+## Plugin Manifest
+
+```json
+{
+  "schemaVersion": 1,
+  "pluginId": "numerical-propagator",
+  "pluginType": "propagator",
+  "name": "Numerical Propagator Plugin (Tudat)",
+  "version": "0.1.0",
+  "description": "High-fidelity numerical orbit propagator powered by Tudat-WASM.",
+  "license": "BSD-3-Clause",
+  "inputs": ["$OEM", "$OCM"],
+  "outputs": ["$OEM"]
+}
 ```
 
-## STM Propagation
-
-State Transition Matrix propagation for covariance mapping:
-
-```cpp
-config.propagate_stm = true;
-auto result = propagate(initial, config);
-// result.stm_history: 6×6 matrix at each output time
-```
-
-## Data Flow
-
-```
-Initial state (km, km/s)
-        │
-        ▼
-┌─────────────────┐
-│ ForceModelConfig │ ← presets or custom
-│ IntegratorConfig │
-└────────┬────────┘
-         │
-         ▼
-  Tudat propagation engine
-  (SI internally, km/s at I/O)
-         │
-         ▼
-  ┌──────────────┐
-  │ OEM $OEM     │ ← FlatBuffer binary
-  │ StateVector  │ ← C++ structs
-  │ STM history  │ ← optional 6×6 matrices
-  └──────────────┘
-```
-
-## Building
-
-```bash
-cd src/cpp && mkdir -p build && cd build
-
-# Native (requires Tudat source)
-cmake .. -DTUDAT_DIR=/path/to/tudat
-make -j4
-./test_propagator
-
-# WASM (via emsdk)
-source /path/to/emsdk/emsdk_env.sh
-emcmake cmake .. -DTUDAT_DIR=/path/to/tudat-wasm
-emmake make -j4
-```
-
-## Dependencies
-
-- [Tudat](https://github.com/tudat-team/tudat) — TU Delft Astrodynamics Toolbox (BSD-3-Clause)
-- [spacedatastandards.org](https://spacedatastandards.org) — OEM FlatBuffers schema
-
-## WASM
-
-- Export: `NUMERICAL_PROP_WASM`
-- Initial memory: 64 MB
-- Max memory: 512 MB
-- Supports pthreads for integrator parallelism
-
-## Units
-
-- **Interface**: km, km/s (J2000 ECI)
-- **Internal**: SI (m, m/s, kg) — matches Tudat convention
-- **Time**: Julian Date (TDB)
+---
 
 ## License
 
-BSD-3-Clause (matches Tudat)
+BSD-3-Clause — see [LICENSE](LICENSE) for details.
+
+---
+
+*Part of the [Space Data Network](https://github.com/the-lobsternaut) plugin ecosystem.*
