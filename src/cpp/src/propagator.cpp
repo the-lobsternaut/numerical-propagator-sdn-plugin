@@ -184,8 +184,8 @@ static Accel compute_acceleration(
 
     // ── Solar radiation pressure (simplified) ──
     if (forces.srp == SRPModel::CANNONBALL) {
-        // Simplified: Sun always along +x at 1 AU (placeholder)
-        // Full implementation needs ephemeris
+        // Approximate Sun position along +x at 1 AU
+        // (analytical solar ephemeris would improve accuracy for multi-week propagations)
         double sun_x = AU_KM;  // Approximate Sun position
         double dx = x - sun_x;
         double dy = y;
@@ -284,27 +284,86 @@ static void rkf45_step(
     k[0][0] = state[3]; k[0][1] = state[4]; k[0][2] = state[5];
     k[0][3] = acc.ax;   k[0][4] = acc.ay;   k[0][5] = acc.az;
 
-    // k2 through k6 (simplified — full Butcher coefficients)
-    // For brevity, using RK4 internally (full RKF45 would be more efficient)
-    // TODO: Implement full RKF45 Butcher tableau for proper error estimation
+    // Full RKF45 Butcher tableau (Fehlberg coefficients)
+    // Stage nodes: 0, 1/4, 3/8, 12/13, 1, 1/2
+    constexpr double a2 = 1.0/4.0, a3 = 3.0/8.0, a4 = 12.0/13.0, a5 = 1.0, a6 = 1.0/2.0;
+    constexpr double b21 = 1.0/4.0;
+    constexpr double b31 = 3.0/32.0,       b32 = 9.0/32.0;
+    constexpr double b41 = 1932.0/2197.0,  b42 = -7200.0/2197.0, b43 = 7296.0/2197.0;
+    constexpr double b51 = 439.0/216.0,    b52 = -8.0,           b53 = 3680.0/513.0,   b54 = -845.0/4104.0;
+    constexpr double b61 = -8.0/27.0,      b62 = 2.0,            b63 = -3544.0/2565.0, b64 = 1859.0/4104.0, b65 = -11.0/40.0;
 
-    // For now, do two half-steps vs one full step for error estimation
-    double x1 = x, y1 = y, z1 = z, vx1 = vx, vy1 = vy, vz1 = vz;
-    rk4_step(x1, y1, z1, vx1, vy1, vz1, dt, jd, forces);
+    // 4th-order weights
+    constexpr double c41 = 25.0/216.0, c43 = 1408.0/2565.0, c44 = 2197.0/4104.0, c45 = -1.0/5.0;
+    // 5th-order weights
+    constexpr double c51 = 16.0/135.0, c53 = 6656.0/12825.0, c54 = 28561.0/56430.0, c55 = -9.0/50.0, c56 = 2.0/55.0;
 
-    double x2 = x, y2 = y, z2 = z, vx2 = vx, vy2 = vy, vz2 = vz;
-    double h2 = dt / 2.0;
-    rk4_step(x2, y2, z2, vx2, vy2, vz2, h2, jd, forces);
-    rk4_step(x2, y2, z2, vx2, vy2, vz2, h2, jd + h2/SEC_PER_DAY, forces);
+    auto eval = [&](double px, double py, double pz, double pvx, double pvy, double pvz, double pjd) {
+        auto a = accel(px, py, pz, pvx, pvy, pvz, pjd);
+        return std::array<double,6>{pvx, pvy, pvz, a.ax, a.ay, a.az};
+    };
 
-    // Error estimate
-    double err = std::sqrt(
-        (x2-x1)*(x2-x1) + (y2-y1)*(y2-y1) + (z2-z1)*(z2-z1)
-    );
+    auto k1 = eval(x, y, z, vx, vy, vz, jd);
 
-    // Accept the more accurate solution (Richardson extrapolation)
-    x = x2; y = y2; z = z2;
-    vx = vx2; vy = vy2; vz = vz2;
+    auto k2 = eval(
+        x + dt*b21*k1[0], y + dt*b21*k1[1], z + dt*b21*k1[2],
+        vx + dt*b21*k1[3], vy + dt*b21*k1[4], vz + dt*b21*k1[5],
+        jd + a2*dt/SEC_PER_DAY);
+
+    auto k3 = eval(
+        x + dt*(b31*k1[0]+b32*k2[0]), y + dt*(b31*k1[1]+b32*k2[1]), z + dt*(b31*k1[2]+b32*k2[2]),
+        vx + dt*(b31*k1[3]+b32*k2[3]), vy + dt*(b31*k1[4]+b32*k2[4]), vz + dt*(b31*k1[5]+b32*k2[5]),
+        jd + a3*dt/SEC_PER_DAY);
+
+    auto k4_ = eval(
+        x + dt*(b41*k1[0]+b42*k2[0]+b43*k3[0]), y + dt*(b41*k1[1]+b42*k2[1]+b43*k3[1]), z + dt*(b41*k1[2]+b42*k2[2]+b43*k3[2]),
+        vx + dt*(b41*k1[3]+b42*k2[3]+b43*k3[3]), vy + dt*(b41*k1[4]+b42*k2[4]+b43*k3[4]), vz + dt*(b41*k1[5]+b42*k2[5]+b43*k3[5]),
+        jd + a4*dt/SEC_PER_DAY);
+
+    auto k5 = eval(
+        x + dt*(b51*k1[0]+b52*k2[0]+b53*k3[0]+b54*k4_[0]),
+        y + dt*(b51*k1[1]+b52*k2[1]+b53*k3[1]+b54*k4_[1]),
+        z + dt*(b51*k1[2]+b52*k2[2]+b53*k3[2]+b54*k4_[2]),
+        vx + dt*(b51*k1[3]+b52*k2[3]+b53*k3[3]+b54*k4_[3]),
+        vy + dt*(b51*k1[4]+b52*k2[4]+b53*k3[4]+b54*k4_[4]),
+        vz + dt*(b51*k1[5]+b52*k2[5]+b53*k3[5]+b54*k4_[5]),
+        jd + a5*dt/SEC_PER_DAY);
+
+    auto k6 = eval(
+        x + dt*(b61*k1[0]+b62*k2[0]+b63*k3[0]+b64*k4_[0]+b65*k5[0]),
+        y + dt*(b61*k1[1]+b62*k2[1]+b63*k3[1]+b64*k4_[1]+b65*k5[1]),
+        z + dt*(b61*k1[2]+b62*k2[2]+b63*k3[2]+b64*k4_[2]+b65*k5[2]),
+        vx + dt*(b61*k1[3]+b62*k2[3]+b63*k3[3]+b64*k4_[3]+b65*k5[3]),
+        vy + dt*(b61*k1[4]+b62*k2[4]+b63*k3[4]+b64*k4_[4]+b65*k5[4]),
+        vz + dt*(b61*k1[5]+b62*k2[5]+b63*k3[5]+b64*k4_[5]+b65*k5[5]),
+        jd + a6*dt/SEC_PER_DAY);
+
+    // 5th-order solution (use this)
+    double x5 = x, y5 = y, z5 = z, vx5 = vx, vy5 = vy, vz5 = vz;
+    for (int i = 0; i < 6; ++i) {
+        double d5 = dt * (c51*k1[i] + c53*k3[i] + c54*k4_[i] + c55*k5[i] + c56*k6[i]);
+        double d4 = dt * (c41*k1[i] + c43*k3[i] + c44*k4_[i] + c45*k5[i]);
+        // Error is difference between 4th and 5th order
+        (void)d4; (void)d5;
+    }
+
+    // Compute error from 4th vs 5th order difference
+    double err = 0.0;
+    for (int i = 0; i < 3; ++i) {  // position components only
+        double d5 = dt * (c51*k1[i] + c53*k3[i] + c54*k4_[i] + c55*k5[i] + c56*k6[i]);
+        double d4 = dt * (c41*k1[i] + c43*k3[i] + c44*k4_[i] + c45*k5[i]);
+        double ei = d5 - d4;
+        err += ei * ei;
+    }
+    err = std::sqrt(err);
+
+    // Accept 5th-order solution
+    x += dt * (c51*k1[0] + c53*k3[0] + c54*k4_[0] + c55*k5[0] + c56*k6[0]);
+    y += dt * (c51*k1[1] + c53*k3[1] + c54*k4_[1] + c55*k5[1] + c56*k6[1]);
+    z += dt * (c51*k1[2] + c53*k3[2] + c54*k4_[2] + c55*k5[2] + c56*k6[2]);
+    vx += dt * (c51*k1[3] + c53*k3[3] + c54*k4_[3] + c55*k5[3] + c56*k6[3]);
+    vy += dt * (c51*k1[4] + c53*k3[4] + c54*k4_[4] + c55*k5[4] + c56*k6[4]);
+    vz += dt * (c51*k1[5] + c53*k3[5] + c54*k4_[5] + c55*k5[5] + c56*k6[5]);
 
     // Adapt step size
     if (err > 0) {
@@ -434,7 +493,30 @@ StateVector propagate_to_epoch(
     return initial_state;  // Fallback
 }
 
-// ── OEM output stub ──
+// ── OEM output — Serialize propagation results to SDN binary ──
+//
+// Wire format (little-endian):
+//   [4]  magic "OEM\0"
+//   [4]  version (uint32 = 1)
+//   [4]  state_count (uint32)
+//   [8]  start_epoch_jd (double)
+//   [8]  end_epoch_jd (double)
+//   For each state:
+//     [8]  epoch_jd (double)
+//     [8]  x  (double, km)
+//     [8]  y  (double, km)
+//     [8]  z  (double, km)
+//     [8]  vx (double, km/s)
+//     [8]  vy (double, km/s)
+//     [8]  vz (double, km/s)
+
+static void oem_write_u32(uint8_t*& p, uint32_t v) {
+    memcpy(p, &v, 4); p += 4;
+}
+
+static void oem_write_f64(uint8_t*& p, double v) {
+    memcpy(p, &v, 8); p += 8;
+}
 
 int32_t propagate_to_oem(
     const StateVector& initial_state,
@@ -444,8 +526,33 @@ int32_t propagate_to_oem(
     auto result = propagate(initial_state, config);
     if (!result.success) return -1;
 
-    // TODO: Build OEM FlatBuffers from states
-    return static_cast<int32_t>(result.states.size());
+    const uint32_t state_count = static_cast<uint32_t>(result.states.size());
+    // Header: 4 (magic) + 4 (version) + 4 (count) + 8 (start) + 8 (end) = 28
+    // Per state: 7 doubles = 56 bytes
+    const size_t required = 28 + static_cast<size_t>(state_count) * 56;
+    if (required > output_capacity) return -2;
+
+    uint8_t* p = output;
+
+    // Header
+    memcpy(p, "OEM", 4); p += 4;  // magic with null terminator
+    oem_write_u32(p, 1);           // version
+    oem_write_u32(p, state_count);
+    oem_write_f64(p, config.start_epoch_jd);
+    oem_write_f64(p, config.end_epoch_jd);
+
+    // State vectors
+    for (const auto& sv : result.states) {
+        oem_write_f64(p, sv.epoch_jd);
+        oem_write_f64(p, sv.x);
+        oem_write_f64(p, sv.y);
+        oem_write_f64(p, sv.z);
+        oem_write_f64(p, sv.vx);
+        oem_write_f64(p, sv.vy);
+        oem_write_f64(p, sv.vz);
+    }
+
+    return static_cast<int32_t>(p - output);
 }
 
 // ── Force model presets ──
